@@ -133,17 +133,6 @@ class VADHead(DETRHead):
                  map_thresh=0.5,
                  dis_thresh=0.2,
                  pe_normalization=True,
-                 ego_his_encoder=None,
-                 ego_fut_mode=3,
-                 loss_plan_reg=dict(type='L1Loss', loss_weight=0.25),
-                 loss_plan_bound=dict(type='PlanMapBoundLoss', loss_weight=0.1),
-                 loss_plan_col=dict(type='PlanAgentDisLoss', loss_weight=0.1),
-                 loss_plan_dir=dict(type='PlanMapThetaLoss', loss_weight=0.1),
-                 ego_agent_decoder=None,
-                 ego_map_decoder=None,
-                 query_thresh=None,
-                 query_use_fix_pad=None,
-                 ego_lcf_feat_idx=None,
                  valid_fut_ts=6,
                  **kwargs):
 
@@ -161,13 +150,6 @@ class VADHead(DETRHead):
         self.map_thresh = map_thresh
         self.dis_thresh = dis_thresh
         self.pe_normalization = pe_normalization
-        self.ego_his_encoder = ego_his_encoder
-        self.ego_fut_mode = ego_fut_mode
-        self.ego_agent_decoder = ego_agent_decoder
-        self.ego_map_decoder = ego_map_decoder
-        self.query_thresh = query_thresh
-        self.query_use_fix_pad = query_use_fix_pad
-        self.ego_lcf_feat_idx = ego_lcf_feat_idx
         self.valid_fut_ts = valid_fut_ts
 
         if loss_traj_cls['use_sigmoid'] == True:
@@ -278,10 +260,6 @@ class VADHead(DETRHead):
         self.loss_map_iou = build_loss(loss_map_iou)
         self.loss_map_pts = build_loss(loss_map_pts)
         self.loss_map_dir = build_loss(loss_map_dir)
-        self.loss_plan_reg = build_loss(loss_plan_reg)
-        self.loss_plan_bound = build_loss(loss_plan_bound)
-        self.loss_plan_col = build_loss(loss_plan_col)
-        self.loss_plan_dir = build_loss(loss_plan_dir)
 
     def _init_layers(self):
         """Initialize classification branch and regression branch of head."""
@@ -398,36 +376,6 @@ class VADHead(DETRHead):
             self.motion_map_decoder = build_transformer_layer_sequence(self.motion_map_decoder)
             if self.use_pe:
                 self.pos_mlp = nn.Linear(2, self.embed_dims)
-        
-        if self.ego_his_encoder is not None:
-            self.ego_his_encoder = LaneNet(2, self.embed_dims//2, 3)
-        else:
-            self.ego_query = nn.Embedding(1, self.embed_dims)	
-
-        if self.ego_agent_decoder is not None:
-            self.ego_agent_decoder = build_transformer_layer_sequence(self.ego_agent_decoder)
-            if self.use_pe:
-                self.ego_agent_pos_mlp = nn.Linear(2, self.embed_dims)
-
-        if self.ego_map_decoder is not None:
-            self.ego_map_decoder = build_transformer_layer_sequence(self.ego_map_decoder)
-            if self.use_pe:
-                self.ego_map_pos_mlp = nn.Linear(2, self.embed_dims)
-
-        ego_fut_decoder = []
-        ego_fut_dec_in_dim = self.embed_dims*2 + len(self.ego_lcf_feat_idx) \
-            if self.ego_lcf_feat_idx is not None else self.embed_dims*2
-        for _ in range(self.num_reg_fcs):
-            ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, ego_fut_dec_in_dim))
-            ego_fut_decoder.append(nn.ReLU())
-        ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, self.ego_fut_mode*self.fut_ts*2))
-        self.ego_fut_decoder = nn.Sequential(*ego_fut_decoder)
-
-        self.agent_fus_mlp = nn.Sequential(
-            nn.Linear(self.fut_mode*2*self.embed_dims, self.embed_dims, bias=True),
-            nn.LayerNorm(self.embed_dims),
-            nn.ReLU(),
-            nn.Linear(self.embed_dims, self.embed_dims, bias=True))
 
     def init_weights(self):
         """Initialize weights of the DeformDETR head."""
@@ -463,18 +411,6 @@ class VADHead(DETRHead):
                     nn.init.xavier_uniform_(p)
             if self.use_pe:
                 xavier_init(self.pos_mlp, distribution='uniform', bias=0.)
-        if self.ego_his_encoder is not None:
-            for p in self.ego_his_encoder.parameters():
-                if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
-        if self.ego_agent_decoder is not None:
-            for p in self.ego_agent_decoder.parameters():
-                if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
-        if self.ego_map_decoder is not None:
-            for p in self.ego_map_decoder.parameters():
-                if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
 
     # @auto_fp16(apply_to=('mlvl_feats'))
     @force_fp32(apply_to=('mlvl_feats', 'prev_bev'))
@@ -483,8 +419,6 @@ class VADHead(DETRHead):
                 img_metas,
                 prev_bev=None,
                 only_bev=False,
-                ego_his_trajs=None,
-                ego_lcf_feat=None,
             ):
         """Forward function.
         Args:
@@ -695,7 +629,6 @@ class VADHead(DETRHead):
         outputs_trajs.append(outputs_traj)
         outputs_traj_class = self.traj_cls_branches[0](motion_hs)
         outputs_trajs_classes.append(outputs_traj_class.squeeze(-1))
-        (batch, num_agent) = motion_hs.shape[:2]
              
         map_outputs_classes = torch.stack(map_outputs_classes)
         map_outputs_coords = torch.stack(map_outputs_coords)
@@ -705,93 +638,6 @@ class VADHead(DETRHead):
         outputs_coords = torch.stack(outputs_coords)
         outputs_trajs = torch.stack(outputs_trajs)
         outputs_trajs_classes = torch.stack(outputs_trajs_classes)
-
-        # planning
-        (batch, num_agent) = motion_hs.shape[:2]
-        if self.ego_his_encoder is not None:
-            ego_his_feats = self.ego_his_encoder(ego_his_trajs)  # [B, 1, dim]
-        else:
-            ego_his_feats = self.ego_query.weight.unsqueeze(0).repeat(batch, 1, 1)
-        # Interaction
-        ego_query = ego_his_feats
-        ego_pos = torch.zeros((batch, 1, 2), device=ego_query.device)
-        ego_pos_emb = self.ego_agent_pos_mlp(ego_pos)
-        agent_conf = outputs_classes[-1]
-        agent_query = motion_hs.reshape(batch, num_agent, -1)
-        agent_query = self.agent_fus_mlp(agent_query) # [B, A, fut_mode, 2*D] -> [B, A, D]
-        agent_pos = outputs_coords_bev[-1]
-        agent_query, agent_pos, agent_mask = self.select_and_pad_query(
-            agent_query, agent_pos, agent_conf,
-            score_thresh=self.query_thresh, use_fix_pad=self.query_use_fix_pad
-        )
-        agent_pos_emb = self.ego_agent_pos_mlp(agent_pos)
-        # ego <-> agent interaction
-        ego_agent_query = self.ego_agent_decoder(
-            query=ego_query.permute(1, 0, 2),
-            key=agent_query.permute(1, 0, 2),
-            value=agent_query.permute(1, 0, 2),
-            query_pos=ego_pos_emb.permute(1, 0, 2),
-            key_pos=agent_pos_emb.permute(1, 0, 2),
-            key_padding_mask=agent_mask)
-
-        # ego <-> map interaction
-        ego_pos = torch.zeros((batch, 1, 2), device=agent_query.device)
-        ego_pos_emb = self.ego_map_pos_mlp(ego_pos)
-        map_query = map_hs[-1].view(batch_size, self.map_num_vec, self.map_num_pts_per_vec, -1)
-        map_query = self.lane_encoder(map_query)  # [B, P, pts, D] -> [B, P, D]
-        map_conf = map_outputs_classes[-1]
-        map_pos = map_outputs_coords_bev[-1]
-        # use the most close pts pos in each map inst as the inst's pos
-        batch, num_map = map_pos.shape[:2]
-        map_dis = torch.sqrt(map_pos[..., 0]**2 + map_pos[..., 1]**2)
-        min_map_pos_idx = map_dis.argmin(dim=-1).flatten()  # [B*P]
-        min_map_pos = map_pos.flatten(0, 1)  # [B*P, pts, 2]
-        min_map_pos = min_map_pos[range(min_map_pos.shape[0]), min_map_pos_idx]  # [B*P, 2]
-        min_map_pos = min_map_pos.view(batch, num_map, 2)  # [B, P, 2]
-        map_query, map_pos, map_mask = self.select_and_pad_query(
-            map_query, min_map_pos, map_conf,
-            score_thresh=self.query_thresh, use_fix_pad=self.query_use_fix_pad
-        )
-        map_pos_emb = self.ego_map_pos_mlp(map_pos)
-        ego_map_query = self.ego_map_decoder(
-            query=ego_agent_query,
-            key=map_query.permute(1, 0, 2),
-            value=map_query.permute(1, 0, 2),
-            query_pos=ego_pos_emb.permute(1, 0, 2),
-            key_pos=map_pos_emb.permute(1, 0, 2),
-            key_padding_mask=map_mask)
-
-        if self.ego_his_encoder is not None and self.ego_lcf_feat_idx is not None:
-            ego_feats = torch.cat(
-                [ego_his_feats,
-                 ego_map_query.permute(1, 0, 2),
-                 ego_lcf_feat.squeeze(1)[..., self.ego_lcf_feat_idx]],
-                dim=-1
-            )  # [B, 1, 2D+2]
-        elif self.ego_his_encoder is not None and self.ego_lcf_feat_idx is None:
-            ego_feats = torch.cat(
-                [ego_his_feats,
-                 ego_map_query.permute(1, 0, 2)],
-                dim=-1
-            )  # [B, 1, 2D]
-        elif self.ego_his_encoder is None and self.ego_lcf_feat_idx is not None:                
-            ego_feats = torch.cat(
-                [ego_agent_query.permute(1, 0, 2),
-                 ego_map_query.permute(1, 0, 2),
-                 ego_lcf_feat.squeeze(1)[..., self.ego_lcf_feat_idx]],
-                dim=-1
-            )  # [B, 1, 2D+2]
-        elif self.ego_his_encoder is None and self.ego_lcf_feat_idx is None:                
-            ego_feats = torch.cat(
-                [ego_agent_query.permute(1, 0, 2),
-                 ego_map_query.permute(1, 0, 2)],
-                dim=-1
-            )  # [B, 1, 2D]  
-
-        # Ego prediction
-        outputs_ego_trajs = self.ego_fut_decoder(ego_feats)
-        outputs_ego_trajs = outputs_ego_trajs.reshape(outputs_ego_trajs.shape[0], 
-                                                      self.ego_fut_mode, self.fut_ts, 2)
 
         outs = {
             'bev_embed': bev_embed,
@@ -807,7 +653,6 @@ class VADHead(DETRHead):
             'map_enc_cls_scores': None,
             'map_enc_bbox_preds': None,
             'map_enc_pts_preds': None,
-            'ego_fut_preds': outputs_ego_trajs,
         }
 
         return outs
@@ -1104,83 +949,6 @@ class VADHead(DETRHead):
         return (labels_list, label_weights_list, bbox_targets_list,
                 bbox_weights_list, pts_targets_list, pts_weights_list,
                 num_total_pos, num_total_neg)
-
-    def loss_planning(self,
-                      ego_fut_preds,
-                      ego_fut_gt,
-                      ego_fut_masks,
-                      ego_fut_cmd,
-                      lane_preds,
-                      lane_score_preds,
-                      agent_preds,
-                      agent_fut_preds,
-                      agent_score_preds,
-                      agent_fut_cls_preds):
-        """"Loss function for ego vehicle planning.
-        Args:
-            ego_fut_preds (Tensor): [B, ego_fut_mode, fut_ts, 2]
-            ego_fut_gt (Tensor): [B, fut_ts, 2]
-            ego_fut_masks (Tensor): [B, fut_ts]
-            ego_fut_cmd (Tensor): [B, ego_fut_mode]
-            lane_preds (Tensor): [B, num_vec, num_pts, 2]
-            lane_score_preds (Tensor): [B, num_vec, 3]
-            agent_preds (Tensor): [B, num_agent, 2]
-            agent_fut_preds (Tensor): [B, num_agent, fut_mode, fut_ts, 2]
-            agent_score_preds (Tensor): [B, num_agent, 10]
-            agent_fut_cls_scores (Tensor): [B, num_agent, fut_mode]
-        Returns:
-            loss_plan_reg (Tensor): planning reg loss.
-            loss_plan_bound (Tensor): planning map boundary constraint loss.
-            loss_plan_col (Tensor): planning col constraint loss.
-            loss_plan_dir (Tensor): planning directional constraint loss.
-        """
-
-        ego_fut_gt = ego_fut_gt.unsqueeze(1).repeat(1, self.ego_fut_mode, 1, 1)
-        loss_plan_l1_weight = ego_fut_cmd[..., None, None] * ego_fut_masks[:, None, :, None]
-        loss_plan_l1_weight = loss_plan_l1_weight.repeat(1, 1, 1, 2)
-
-        loss_plan_l1 = self.loss_plan_reg(
-            ego_fut_preds,
-            ego_fut_gt,
-            loss_plan_l1_weight
-        )
-
-        loss_plan_bound = self.loss_plan_bound(
-            ego_fut_preds[ego_fut_cmd==1],
-            lane_preds,
-            lane_score_preds,
-            weight=ego_fut_masks
-        )
-
-        loss_plan_col = self.loss_plan_col(
-            ego_fut_preds[ego_fut_cmd==1],
-            agent_preds,
-            agent_fut_preds,
-            agent_score_preds,
-            agent_fut_cls_preds,
-            weight=ego_fut_masks[:, :, None].repeat(1, 1, 2)
-        )
-
-        loss_plan_dir = self.loss_plan_dir(
-            ego_fut_preds[ego_fut_cmd==1],
-            lane_preds,
-            lane_score_preds,
-            weight=ego_fut_masks
-        )
-
-        if digit_version(TORCH_VERSION) >= digit_version('1.8'):
-            loss_plan_l1 = torch.nan_to_num(loss_plan_l1)
-            loss_plan_bound = torch.nan_to_num(loss_plan_bound)
-            loss_plan_col = torch.nan_to_num(loss_plan_col)
-            loss_plan_dir = torch.nan_to_num(loss_plan_dir)
-        
-        loss_plan_dict = dict()
-        loss_plan_dict['loss_plan_reg'] = loss_plan_l1
-        loss_plan_dict['loss_plan_bound'] = loss_plan_bound
-        loss_plan_dict['loss_plan_col'] = loss_plan_col
-        loss_plan_dict['loss_plan_dir'] = loss_plan_dir
-
-        return loss_plan_dict
     
     def loss_single(self,
                     cls_scores,
@@ -1493,9 +1261,6 @@ class VADHead(DETRHead):
              map_gt_bboxes_list,
              map_gt_labels_list,
              preds_dicts,
-             ego_fut_gt,
-             ego_fut_masks,
-             ego_fut_cmd,
              gt_attr_labels,
              gt_bboxes_ignore=None,
              map_gt_bboxes_ignore=None,
@@ -1545,7 +1310,6 @@ class VADHead(DETRHead):
         map_enc_cls_scores = preds_dicts['map_enc_cls_scores']
         map_enc_bbox_preds = preds_dicts['map_enc_bbox_preds']
         map_enc_pts_preds = preds_dicts['map_enc_pts_preds']
-        ego_fut_preds = preds_dicts['ego_fut_preds']
 
         num_dec_layers = len(all_cls_scores)
         device = gt_labels_list[0].device
@@ -1593,7 +1357,7 @@ class VADHead(DETRHead):
             raise NotImplementedError
         map_all_gt_bboxes_list = [map_gt_bboxes_list for _ in range(num_dec_layers)]
         map_all_gt_labels_list = [map_gt_labels_list for _ in range(num_dec_layers)]
-        map_all_gt_pts_list = [map_gt_pts_list for _ in range(num_dec_layers)]
+        # map_all_gt_pts_list = [map_gt_pts_list for _ in range(num_dec_layers)]
         map_all_gt_shifts_pts_list = [map_gt_shifts_pts_list for _ in range(num_dec_layers)]
         map_all_gt_bboxes_ignore_list = [
             map_gt_bboxes_ignore for _ in range(num_dec_layers)
@@ -1617,25 +1381,6 @@ class VADHead(DETRHead):
         loss_dict['loss_map_iou'] = map_losses_iou[-1]
         loss_dict['loss_map_pts'] = map_losses_pts[-1]
         loss_dict['loss_map_dir'] = map_losses_dir[-1]
-
-        # Planning Loss
-        ego_fut_gt = ego_fut_gt.squeeze(1)
-        ego_fut_masks = ego_fut_masks.squeeze(1).squeeze(1)
-        ego_fut_cmd = ego_fut_cmd.squeeze(1).squeeze(1)
-
-        batch, num_agent = all_traj_preds[-1].shape[:2]
-        agent_fut_preds = all_traj_preds[-1].view(batch, num_agent, self.fut_mode, self.fut_ts, 2)
-        agent_fut_cls_preds = all_traj_cls_scores[-1].view(batch, num_agent, self.fut_mode)
-        loss_plan_input = [ego_fut_preds, ego_fut_gt, ego_fut_masks, ego_fut_cmd,
-                           map_all_pts_preds[-1], map_all_cls_scores[-1].sigmoid(),
-                           all_bbox_preds[-1][..., 0:2], agent_fut_preds,
-                           all_cls_scores[-1].sigmoid(), agent_fut_cls_preds.sigmoid()]
-
-        loss_planning_dict = self.loss_planning(*loss_plan_input)
-        loss_dict['loss_plan_reg'] = loss_planning_dict['loss_plan_reg']
-        loss_dict['loss_plan_bound'] = loss_planning_dict['loss_plan_bound']
-        loss_dict['loss_plan_col'] = loss_planning_dict['loss_plan_col']
-        loss_dict['loss_plan_dir'] = loss_planning_dict['loss_plan_dir']
 
         # loss from other decoder layers
         num_dec_layer = 0
@@ -1732,166 +1477,3 @@ class VADHead(DETRHead):
                              map_scores, map_labels, map_pts])
 
         return ret_list
-
-    def select_and_pad_pred_map(
-        self,
-        motion_pos,
-        map_query,
-        map_score,
-        map_pos,
-        map_thresh=0.5,
-        dis_thresh=None,
-        pe_normalization=True,
-        use_fix_pad=False
-    ):
-        """select_and_pad_pred_map.
-        Args:
-            motion_pos: [B, A, 2]
-            map_query: [B, P, D].
-            map_score: [B, P, 3].
-            map_pos: [B, P, pts, 2].
-            map_thresh: map confidence threshold for filtering low-confidence preds
-            dis_thresh: distance threshold for masking far maps for each agent in cross-attn
-            use_fix_pad: always pad one lane instance for each batch
-        Returns:
-            selected_map_query: [B*A, P1(+1), D], P1 is the max inst num after filter and pad.
-            selected_map_pos: [B*A, P1(+1), 2]
-            selected_padding_mask: [B*A, P1(+1)]
-        """
-        
-        if dis_thresh is None:
-            raise NotImplementedError('Not implement yet')
-
-        # use the most close pts pos in each map inst as the inst's pos
-        batch, num_map = map_pos.shape[:2]
-        map_dis = torch.sqrt(map_pos[..., 0]**2 + map_pos[..., 1]**2)
-        min_map_pos_idx = map_dis.argmin(dim=-1).flatten()  # [B*P]
-        min_map_pos = map_pos.flatten(0, 1)  # [B*P, pts, 2]
-        min_map_pos = min_map_pos[range(min_map_pos.shape[0]), min_map_pos_idx]  # [B*P, 2]
-        min_map_pos = min_map_pos.view(batch, num_map, 2)  # [B, P, 2]
-
-        # select & pad map vectors for different batch using map_thresh
-        map_score = map_score.sigmoid()
-        map_max_score = map_score.max(dim=-1)[0]
-        map_idx = map_max_score > map_thresh
-        batch_max_pnum = 0
-        for i in range(map_score.shape[0]):
-            pnum = map_idx[i].sum()
-            if pnum > batch_max_pnum:
-                batch_max_pnum = pnum
-
-        selected_map_query, selected_map_pos, selected_padding_mask = [], [], []
-        for i in range(map_score.shape[0]):
-            dim = map_query.shape[-1]
-            valid_pnum = map_idx[i].sum()
-            valid_map_query = map_query[i, map_idx[i]]
-            valid_map_pos = min_map_pos[i, map_idx[i]]
-            pad_pnum = batch_max_pnum - valid_pnum
-            padding_mask = torch.tensor([False], device=map_score.device).repeat(batch_max_pnum)
-            if pad_pnum != 0:
-                valid_map_query = torch.cat([valid_map_query, torch.zeros((pad_pnum, dim), device=map_score.device)], dim=0)
-                valid_map_pos = torch.cat([valid_map_pos, torch.zeros((pad_pnum, 2), device=map_score.device)], dim=0)
-                padding_mask[valid_pnum:] = True
-            selected_map_query.append(valid_map_query)
-            selected_map_pos.append(valid_map_pos)
-            selected_padding_mask.append(padding_mask)
-
-        selected_map_query = torch.stack(selected_map_query, dim=0)
-        selected_map_pos = torch.stack(selected_map_pos, dim=0)
-        selected_padding_mask = torch.stack(selected_padding_mask, dim=0)
-
-        # generate different pe for map vectors for each agent
-        num_agent = motion_pos.shape[1]
-        selected_map_query = selected_map_query.unsqueeze(1).repeat(1, num_agent, 1, 1)  # [B, A, max_P, D]
-        selected_map_pos = selected_map_pos.unsqueeze(1).repeat(1, num_agent, 1, 1)  # [B, A, max_P, 2]
-        selected_padding_mask = selected_padding_mask.unsqueeze(1).repeat(1, num_agent, 1)  # [B, A, max_P]
-        # move lane to per-car coords system
-        selected_map_dist = selected_map_pos - motion_pos[:, :, None, :]  # [B, A, max_P, 2]
-        if pe_normalization:
-            selected_map_pos = selected_map_pos - motion_pos[:, :, None, :]  # [B, A, max_P, 2]
-
-        # filter far map inst for each agent
-        map_dis = torch.sqrt(selected_map_dist[..., 0]**2 + selected_map_dist[..., 1]**2)
-        valid_map_inst = (map_dis <= dis_thresh)  # [B, A, max_P]
-        invalid_map_inst = (valid_map_inst == False)
-        selected_padding_mask = selected_padding_mask + invalid_map_inst
-
-        selected_map_query = selected_map_query.flatten(0, 1)
-        selected_map_pos = selected_map_pos.flatten(0, 1)
-        selected_padding_mask = selected_padding_mask.flatten(0, 1)
-
-        num_batch = selected_padding_mask.shape[0]
-        feat_dim = selected_map_query.shape[-1]
-        if use_fix_pad:
-            pad_map_query = torch.zeros((num_batch, 1, feat_dim), device=selected_map_query.device)
-            pad_map_pos = torch.ones((num_batch, 1, 2), device=selected_map_pos.device)
-            pad_lane_mask = torch.tensor([False], device=selected_padding_mask.device).unsqueeze(0).repeat(num_batch, 1)
-            selected_map_query = torch.cat([selected_map_query, pad_map_query], dim=1)
-            selected_map_pos = torch.cat([selected_map_pos, pad_map_pos], dim=1)
-            selected_padding_mask = torch.cat([selected_padding_mask, pad_lane_mask], dim=1)
-
-        return selected_map_query, selected_map_pos, selected_padding_mask
-
-
-    def select_and_pad_query(
-        self,
-        query,
-        query_pos,
-        query_score,
-        score_thresh=0.5,
-        use_fix_pad=True
-    ):
-        """select_and_pad_query.
-        Args:
-            query: [B, Q, D].
-            query_pos: [B, Q, 2]
-            query_score: [B, Q, C].
-            score_thresh: confidence threshold for filtering low-confidence query
-            use_fix_pad: always pad one query instance for each batch
-        Returns:
-            selected_query: [B, Q', D]
-            selected_query_pos: [B, Q', 2]
-            selected_padding_mask: [B, Q']
-        """
-
-        # select & pad query for different batch using score_thresh
-        query_score = query_score.sigmoid()
-        query_score = query_score.max(dim=-1)[0]
-        query_idx = query_score > score_thresh
-        batch_max_qnum = 0
-        for i in range(query_score.shape[0]):
-            qnum = query_idx[i].sum()
-            if qnum > batch_max_qnum:
-                batch_max_qnum = qnum
-
-        selected_query, selected_query_pos, selected_padding_mask = [], [], []
-        for i in range(query_score.shape[0]):
-            dim = query.shape[-1]
-            valid_qnum = query_idx[i].sum()
-            valid_query = query[i, query_idx[i]]
-            valid_query_pos = query_pos[i, query_idx[i]]
-            pad_qnum = batch_max_qnum - valid_qnum
-            padding_mask = torch.tensor([False], device=query_score.device).repeat(batch_max_qnum)
-            if pad_qnum != 0:
-                valid_query = torch.cat([valid_query, torch.zeros((pad_qnum, dim), device=query_score.device)], dim=0)
-                valid_query_pos = torch.cat([valid_query_pos, torch.zeros((pad_qnum, 2), device=query_score.device)], dim=0)
-                padding_mask[valid_qnum:] = True
-            selected_query.append(valid_query)
-            selected_query_pos.append(valid_query_pos)
-            selected_padding_mask.append(padding_mask)
-
-        selected_query = torch.stack(selected_query, dim=0)
-        selected_query_pos = torch.stack(selected_query_pos, dim=0)
-        selected_padding_mask = torch.stack(selected_padding_mask, dim=0)
-
-        num_batch = selected_padding_mask.shape[0]
-        feat_dim = selected_query.shape[-1]
-        if use_fix_pad:
-            pad_query = torch.zeros((num_batch, 1, feat_dim), device=selected_query.device)
-            pad_query_pos = torch.ones((num_batch, 1, 2), device=selected_query_pos.device)
-            pad_mask = torch.tensor([False], device=selected_padding_mask.device).unsqueeze(0).repeat(num_batch, 1)
-            selected_query = torch.cat([selected_query, pad_query], dim=1)
-            selected_query_pos = torch.cat([selected_query_pos, pad_query_pos], dim=1)
-            selected_padding_mask = torch.cat([selected_padding_mask, pad_mask], dim=1)
-
-        return selected_query, selected_query_pos, selected_padding_mask

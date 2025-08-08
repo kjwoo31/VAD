@@ -9,7 +9,6 @@ from scipy.optimize import linear_sum_assignment
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
-from projects.mmdet3d_plugin.VAD.planner.metric_stp3 import PlanningMetric
 
 
 @DETECTORS.register_module()
@@ -59,8 +58,6 @@ class VAD(MVXTwoStageDetector):
             'prev_pos': 0,
             'prev_angle': 0,
         }
-
-        self.planning_metric = None
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -115,11 +112,6 @@ class VAD(MVXTwoStageDetector):
                           gt_bboxes_ignore=None,
                           map_gt_bboxes_ignore=None,
                           prev_bev=None,
-                          ego_his_trajs=None,
-                          ego_fut_trajs=None,
-                          ego_fut_masks=None,
-                          ego_fut_cmd=None,
-                          ego_lcf_feat=None,
                           gt_attr_labels=None):
         """Forward function'
         Args:
@@ -136,11 +128,10 @@ class VAD(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
 
-        outs = self.pts_bbox_head(pts_feats, img_metas, prev_bev,
-                                  ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat)
+        outs = self.pts_bbox_head(pts_feats, img_metas, prev_bev)
         loss_inputs = [
             gt_bboxes_3d, gt_labels_3d, map_gt_bboxes_3d, map_gt_labels_3d,
-            outs, ego_fut_trajs, ego_fut_masks, ego_fut_cmd, gt_attr_labels
+            outs, gt_attr_labels
         ]
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
         return losses
@@ -200,11 +191,6 @@ class VAD(MVXTwoStageDetector):
                       map_gt_bboxes_ignore=None,
                       img_depth=None,
                       img_mask=None,
-                      ego_his_trajs=None,
-                      ego_fut_trajs=None,
-                      ego_fut_masks=None,
-                      ego_fut_cmd=None,
-                      ego_lcf_feat=None,
                       gt_attr_labels=None
                       ):
         """Forward training function.
@@ -246,9 +232,7 @@ class VAD(MVXTwoStageDetector):
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d,
                                             map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
                                             gt_bboxes_ignore, map_gt_bboxes_ignore, prev_bev,
-                                            ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
-                                            ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
-                                            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
+                                            gt_attr_labels=gt_attr_labels)
 
         losses.update(losses_pts)
         return losses
@@ -259,10 +243,6 @@ class VAD(MVXTwoStageDetector):
         gt_bboxes_3d,
         gt_labels_3d,
         img=None,
-        ego_his_trajs=None,
-        ego_fut_trajs=None,
-        ego_fut_cmd=None,
-        ego_lcf_feat=None,
         gt_attr_labels=None,
         **kwargs
     ):
@@ -298,10 +278,6 @@ class VAD(MVXTwoStageDetector):
             prev_bev=self.prev_frame_info['prev_bev'],
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
-            ego_his_trajs=ego_his_trajs[0],
-            ego_fut_trajs=ego_fut_trajs[0],
-            ego_fut_cmd=ego_fut_cmd[0],
-            ego_lcf_feat=ego_lcf_feat[0],
             gt_attr_labels=gt_attr_labels,
             **kwargs
         )
@@ -322,10 +298,6 @@ class VAD(MVXTwoStageDetector):
         points=None,
         fut_valid_flag=None,
         rescale=False,
-        ego_his_trajs=None,
-        ego_fut_trajs=None,
-        ego_fut_cmd=None,
-        ego_lcf_feat=None,
         gt_attr_labels=None,
         **kwargs
     ):
@@ -341,10 +313,6 @@ class VAD(MVXTwoStageDetector):
             fut_valid_flag=fut_valid_flag,
             rescale=rescale,
             start=None,
-            ego_his_trajs=ego_his_trajs,
-            ego_fut_trajs=ego_fut_trajs,
-            ego_fut_cmd=ego_fut_cmd,
-            ego_lcf_feat=ego_lcf_feat,
             gt_attr_labels=gt_attr_labels,
         )
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
@@ -363,10 +331,6 @@ class VAD(MVXTwoStageDetector):
         fut_valid_flag=None,
         rescale=False,
         start=None,
-        ego_his_trajs=None,
-        ego_fut_trajs=None,
-        ego_fut_cmd=None,
-        ego_lcf_feat=None,
         gt_attr_labels=None,
     ):
         """Test function"""
@@ -376,8 +340,7 @@ class VAD(MVXTwoStageDetector):
             'pedestrian', 'traffic_cone'
         ]
 
-        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev,
-                                  ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat)
+        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev)
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
 
         bbox_results = []
@@ -387,8 +350,6 @@ class VAD(MVXTwoStageDetector):
             bbox_result['trajs_3d'] = trajs.cpu()
             map_bbox_result = self.map_pred2result(map_bboxes, map_scores, map_labels, map_pts)
             bbox_result.update(map_bbox_result)
-            bbox_result['ego_fut_preds'] = outs['ego_fut_preds'][i].cpu()
-            bbox_result['ego_fut_cmd'] = ego_fut_cmd.cpu()
             bbox_results.append(bbox_result)
 
         assert len(bbox_results) == 1, 'only support batch_size=1 now'
@@ -414,25 +375,6 @@ class VAD(MVXTwoStageDetector):
             metric_dict = self.compute_motion_metric_vip3d(
                 gt_bbox, gt_label, gt_attr_label, bbox_result,
                 matched_bbox_result, mapped_class_names)
-
-            # ego planning metric
-            assert ego_fut_trajs.shape[0] == 1, 'only support batch_size=1 for testing'
-            ego_fut_preds = bbox_result['ego_fut_preds']
-            ego_fut_trajs = ego_fut_trajs[0, 0]
-            ego_fut_cmd = ego_fut_cmd[0, 0, 0]
-            ego_fut_cmd_idx = torch.nonzero(ego_fut_cmd)[0, 0]
-            ego_fut_pred = ego_fut_preds[ego_fut_cmd_idx]
-            ego_fut_pred = ego_fut_pred.cumsum(dim=-2)
-            ego_fut_trajs = ego_fut_trajs.cumsum(dim=-2)
-
-            metric_dict_planner_stp3 = self.compute_planner_metric_stp3(
-                pred_ego_fut_trajs = ego_fut_pred[None],
-                gt_ego_fut_trajs = ego_fut_trajs[None],
-                gt_agent_boxes = gt_bbox,
-                gt_agent_feats = gt_attr_label.unsqueeze(0),
-                fut_valid_flag = fut_valid_flag
-            )
-            metric_dict.update(metric_dict_planner_stp3)
 
         return outs['bev_embed'], bbox_results, metric_dict
 
@@ -588,57 +530,3 @@ class VAD(MVXTwoStageDetector):
                         metric_dict['MR_'+box_name] += 1
 
         return metric_dict
-
-    ### same planning metric as stp3
-    def compute_planner_metric_stp3(
-        self,
-        pred_ego_fut_trajs,
-        gt_ego_fut_trajs,
-        gt_agent_boxes,
-        gt_agent_feats,
-        fut_valid_flag
-    ):
-        """Compute planner metric for one sample same as stp3."""
-        metric_dict = {
-            'plan_L2_1s':0,
-            'plan_L2_2s':0,
-            'plan_L2_3s':0,
-            'plan_obj_col_1s':0,
-            'plan_obj_col_2s':0,
-            'plan_obj_col_3s':0,
-            'plan_obj_box_col_1s':0,
-            'plan_obj_box_col_2s':0,
-            'plan_obj_box_col_3s':0,
-        }
-        metric_dict['fut_valid_flag'] = fut_valid_flag
-        future_second = 3
-        assert pred_ego_fut_trajs.shape[0] == 1, 'only support bs=1'
-        if self.planning_metric is None:
-            self.planning_metric = PlanningMetric()
-        segmentation, pedestrian = self.planning_metric.get_label(
-            gt_agent_boxes, gt_agent_feats)
-        occupancy = torch.logical_or(segmentation, pedestrian)
-
-        for i in range(future_second):
-            if fut_valid_flag:
-                cur_time = (i+1)*2
-                traj_L2 = self.planning_metric.compute_L2(
-                    pred_ego_fut_trajs[0, :cur_time].detach().to(gt_ego_fut_trajs.device),
-                    gt_ego_fut_trajs[0, :cur_time]
-                )
-                obj_coll, obj_box_coll = self.planning_metric.evaluate_coll(
-                    pred_ego_fut_trajs[:, :cur_time].detach(),
-                    gt_ego_fut_trajs[:, :cur_time],
-                    occupancy)
-                metric_dict['plan_L2_{}s'.format(i+1)] = traj_L2
-                metric_dict['plan_obj_col_{}s'.format(i+1)] = obj_coll.mean().item()
-                metric_dict['plan_obj_box_col_{}s'.format(i+1)] = obj_box_coll.mean().item()
-            else:
-                metric_dict['plan_L2_{}s'.format(i+1)] = 0.0
-                metric_dict['plan_obj_col_{}s'.format(i+1)] = 0.0
-                metric_dict['plan_obj_box_col_{}s'.format(i+1)] = 0.0
-            
-        return metric_dict
-
-    def set_epoch(self, epoch): 
-        self.pts_bbox_head.epoch = epoch

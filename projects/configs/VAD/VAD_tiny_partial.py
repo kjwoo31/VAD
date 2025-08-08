@@ -42,7 +42,7 @@ _num_levels_ = 1
 bev_h_ = 100
 bev_w_ = 100
 queue_length = 3 # each sequence contains `queue_length` frames.
-total_epochs = 12
+total_epochs = 48
 
 model = dict(
     type='VAD',
@@ -73,43 +73,7 @@ model = dict(
         pe_normalization=True,
         tot_epoch=total_epochs,
         use_traj_lr_warmup=False,
-        query_thresh=0.0,
-        query_use_fix_pad=False,
-        ego_his_encoder=None,
-        ego_lcf_feat_idx=None,
         valid_fut_ts=6,
-        ego_agent_decoder=dict(
-            type='CustomTransformerDecoder',
-            num_layers=1,
-            return_intermediate=False,
-            transformerlayers=dict(
-                type='BaseTransformerLayer',
-                attn_cfgs=[
-                    dict(
-                        type='MultiheadAttention',
-                        embed_dims=_dim_,
-                        num_heads=8,
-                        dropout=0.1),
-                ],
-                feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.1,
-                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
-        ego_map_decoder=dict(
-            type='CustomTransformerDecoder',
-            num_layers=1,
-            return_intermediate=False,
-            transformerlayers=dict(
-                type='BaseTransformerLayer',
-                attn_cfgs=[
-                    dict(
-                        type='MultiheadAttention',
-                        embed_dims=_dim_,
-                        num_heads=8,
-                        dropout=0.1),
-                ],
-                feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.1,
-                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
         motion_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=1,
@@ -264,8 +228,8 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=0.8),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.1),
+            loss_weight=2.0),
+        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
         loss_traj=dict(type='L1Loss', loss_weight=0.2),
         loss_traj_cls=dict(
             type='FocalLoss',
@@ -279,15 +243,11 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=0.8),
+            loss_weight=2.0),
         loss_map_bbox=dict(type='L1Loss', loss_weight=0.0),
         loss_map_iou=dict(type='GIoULoss', loss_weight=0.0),
-        loss_map_pts=dict(type='PtsL1Loss', loss_weight=0.4),
-        loss_map_dir=dict(type='PtsDirCosLoss', loss_weight=0.005),
-        loss_plan_reg=dict(type='L1Loss', loss_weight=1.0),
-        loss_plan_bound=dict(type='PlanMapBoundLoss', loss_weight=1.0, dis_thresh=1.0),
-        loss_plan_col=dict(type='PlanCollisionLoss', loss_weight=1.0),
-        loss_plan_dir=dict(type='PlanMapDirectionLoss', loss_weight=0.5)),
+        loss_map_pts=dict(type='PtsL1Loss', loss_weight=1.0),
+        loss_map_dir=dict(type='PtsDirCosLoss', loss_weight=0.005)),
     # model training and testing settings
     train_cfg=dict(pts=dict(
         grid_size=[512, 512, 1],
@@ -296,16 +256,16 @@ model = dict(
         out_size_factor=4,
         assigner=dict(
             type='HungarianAssigner3D',
-            cls_cost=dict(type='FocalLossCost', weight=0.8),
-            reg_cost=dict(type='BBox3DL1Cost', weight=0.1),
+            cls_cost=dict(type='FocalLossCost', weight=2.0),
+            reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range),
         map_assigner=dict(
             type='MapHungarianAssigner3D',
-            cls_cost=dict(type='FocalLossCost', weight=0.8),
+            cls_cost=dict(type='FocalLossCost', weight=2.0),
             reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
             iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
-            pts_cost=dict(type='OrderedPtsL1Cost', weight=0.4),
+            pts_cost=dict(type='OrderedPtsL1Cost', weight=1.0),
             pc_range=point_cloud_range))))
 
 dataset_type = 'VADCustomNuScenesDataset'
@@ -323,8 +283,7 @@ train_pipeline = [
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
     dict(type='CustomCollect3D',\
-         keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
-               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'])
+         keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_attr_labels'])
 ]
 
 test_pipeline = [
@@ -349,9 +308,7 @@ test_pipeline = [
             dict(type='PadMultiViewImage', size_divisor=32),
             dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_label=False, with_ego=True),
             dict(type='CustomCollect3D',\
-                 keys=['points', 'gt_bboxes_3d', 'gt_labels_3d', 'img', 'fut_valid_flag',
-                       'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
-                       'ego_lcf_feat', 'gt_attr_labels'])])
+                 keys=['points', 'gt_bboxes_3d', 'gt_labels_3d', 'img', 'fut_valid_flag', 'gt_attr_labels'])])
 ]
 
 data = dict(
