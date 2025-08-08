@@ -1477,3 +1477,102 @@ class VADHead(DETRHead):
                              map_scores, map_labels, map_pts])
 
         return ret_list
+
+    def select_and_pad_pred_map(
+        self,
+        motion_pos,
+        map_query,
+        map_score,
+        map_pos,
+        map_thresh=0.5,
+        dis_thresh=None,
+        pe_normalization=True,
+        use_fix_pad=False
+    ):
+        """select_and_pad_pred_map.
+        Args:
+            motion_pos: [B, A, 2]
+            map_query: [B, P, D].
+            map_score: [B, P, 3].
+            map_pos: [B, P, pts, 2].
+            map_thresh: map confidence threshold for filtering low-confidence preds
+            dis_thresh: distance threshold for masking far maps for each agent in cross-attn
+            use_fix_pad: always pad one lane instance for each batch
+        Returns:
+            selected_map_query: [B*A, P1(+1), D], P1 is the max inst num after filter and pad.
+            selected_map_pos: [B*A, P1(+1), 2]
+            selected_padding_mask: [B*A, P1(+1)]
+        """
+        
+        if dis_thresh is None:
+            raise NotImplementedError('Not implement yet')
+
+        # use the most close pts pos in each map inst as the inst's pos
+        batch, num_map = map_pos.shape[:2]
+        map_dis = torch.sqrt(map_pos[..., 0]**2 + map_pos[..., 1]**2)
+        min_map_pos_idx = map_dis.argmin(dim=-1).flatten()  # [B*P]
+        min_map_pos = map_pos.flatten(0, 1)  # [B*P, pts, 2]
+        min_map_pos = min_map_pos[range(min_map_pos.shape[0]), min_map_pos_idx]  # [B*P, 2]
+        min_map_pos = min_map_pos.view(batch, num_map, 2)  # [B, P, 2]
+
+        # select & pad map vectors for different batch using map_thresh
+        map_score = map_score.sigmoid()
+        map_max_score = map_score.max(dim=-1)[0]
+        map_idx = map_max_score > map_thresh
+        batch_max_pnum = 0
+        for i in range(map_score.shape[0]):
+            pnum = map_idx[i].sum()
+            if pnum > batch_max_pnum:
+                batch_max_pnum = pnum
+
+        selected_map_query, selected_map_pos, selected_padding_mask = [], [], []
+        for i in range(map_score.shape[0]):
+            dim = map_query.shape[-1]
+            valid_pnum = map_idx[i].sum()
+            valid_map_query = map_query[i, map_idx[i]]
+            valid_map_pos = min_map_pos[i, map_idx[i]]
+            pad_pnum = batch_max_pnum - valid_pnum
+            padding_mask = torch.tensor([False], device=map_score.device).repeat(batch_max_pnum)
+            if pad_pnum != 0:
+                valid_map_query = torch.cat([valid_map_query, torch.zeros((pad_pnum, dim), device=map_score.device)], dim=0)
+                valid_map_pos = torch.cat([valid_map_pos, torch.zeros((pad_pnum, 2), device=map_score.device)], dim=0)
+                padding_mask[valid_pnum:] = True
+            selected_map_query.append(valid_map_query)
+            selected_map_pos.append(valid_map_pos)
+            selected_padding_mask.append(padding_mask)
+
+        selected_map_query = torch.stack(selected_map_query, dim=0)
+        selected_map_pos = torch.stack(selected_map_pos, dim=0)
+        selected_padding_mask = torch.stack(selected_padding_mask, dim=0)
+
+        # generate different pe for map vectors for each agent
+        num_agent = motion_pos.shape[1]
+        selected_map_query = selected_map_query.unsqueeze(1).repeat(1, num_agent, 1, 1)  # [B, A, max_P, D]
+        selected_map_pos = selected_map_pos.unsqueeze(1).repeat(1, num_agent, 1, 1)  # [B, A, max_P, 2]
+        selected_padding_mask = selected_padding_mask.unsqueeze(1).repeat(1, num_agent, 1)  # [B, A, max_P]
+        # move lane to per-car coords system
+        selected_map_dist = selected_map_pos - motion_pos[:, :, None, :]  # [B, A, max_P, 2]
+        if pe_normalization:
+            selected_map_pos = selected_map_pos - motion_pos[:, :, None, :]  # [B, A, max_P, 2]
+
+        # filter far map inst for each agent
+        map_dis = torch.sqrt(selected_map_dist[..., 0]**2 + selected_map_dist[..., 1]**2)
+        valid_map_inst = (map_dis <= dis_thresh)  # [B, A, max_P]
+        invalid_map_inst = (valid_map_inst == False)
+        selected_padding_mask = selected_padding_mask + invalid_map_inst
+
+        selected_map_query = selected_map_query.flatten(0, 1)
+        selected_map_pos = selected_map_pos.flatten(0, 1)
+        selected_padding_mask = selected_padding_mask.flatten(0, 1)
+
+        num_batch = selected_padding_mask.shape[0]
+        feat_dim = selected_map_query.shape[-1]
+        if use_fix_pad:
+            pad_map_query = torch.zeros((num_batch, 1, feat_dim), device=selected_map_query.device)
+            pad_map_pos = torch.ones((num_batch, 1, 2), device=selected_map_pos.device)
+            pad_lane_mask = torch.tensor([False], device=selected_padding_mask.device).unsqueeze(0).repeat(num_batch, 1)
+            selected_map_query = torch.cat([selected_map_query, pad_map_query], dim=1)
+            selected_map_pos = torch.cat([selected_map_pos, pad_map_pos], dim=1)
+            selected_padding_mask = torch.cat([selected_padding_mask, pad_lane_mask], dim=1)
+
+        return selected_map_query, selected_map_pos, selected_padding_mask

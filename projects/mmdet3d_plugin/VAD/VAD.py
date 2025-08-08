@@ -530,3 +530,6 @@ class VAD(MVXTwoStageDetector):
                         metric_dict['MR_'+box_name] += 1
 
         return metric_dict
+
+    def set_epoch(self, epoch): 
+        self.pts_bbox_head.epoch = epoch
